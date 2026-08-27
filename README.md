@@ -1,4 +1,4 @@
-# qr-server
+# go-decimen-optical-transfer
 
 Golang port for server part from [bashalarmistalt/decimen-optical-transfer](https://github.com/bashalarmistalt/decimen-optical-transfer)
 
