@@ -1,5 +1,7 @@
 # qr-server
 
+![Screenshot](docs/screenshot.jpg)
+
 A Go web app that turns a file or a folder into a QR code carousel a camera can
 read. It is the **sending** half of [Decimen optical
 transfer](https://github.com/decimen/decimen-optical-transfer), ported from that
