@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>qr-server — optical transfer sender</title>
+<style>
+  :root {
+    --bg: #12131a; --panel: #1c1e28; --line: #2c2f3d;
+    --ink: #e9eaf0; --dim: #9aa0b4; --accent: #6ee7b7; --warn: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  header { padding: 20px 24px 8px; }
+  h1 { margin: 0; font-size: 18px; letter-spacing: .2px; }
+  header p { margin: 4px 0 0; color: var(--dim); }
+  main { padding: 16px 24px 48px; display: grid; gap: 16px; max-width: 1100px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  #drop { text-align: center; padding: 28px; border: 1px dashed var(--line); border-radius: 10px; }
+  #drop.over { border-color: var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--dim); }
+  select, input[type=number] {
+    background: #0f1017; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 8px; font: inherit; min-width: 96px;
+  }
+  button {
+    background: var(--accent); color: #08130e; border: 0; border-radius: 6px;
+    padding: 8px 14px; font: 600 14px/1 inherit; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+  button:disabled { opacity: .5; cursor: default; }
+  #stage { display: none; }
+  #stage.on { display: grid; gap: 12px; }
+  #canvasWrap { display: grid; place-items: center; background: #fff; border-radius: 8px; padding: 12px; }
+  canvas { image-rendering: pixelated; width: min(72vmin, 560px); height: auto; }
+  dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; margin: 0; }
+  dt { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  dd { margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+  #err { color: var(--warn); }
+  #files { color: var(--dim); font-size: 12px; white-space: pre-wrap; }
+  progress { width: 100%; height: 6px; }
+  .hint { color: var(--dim); font-size: 12px; margin: 8px 0 0; }
+  #grid { display: none; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  #grid.on { display: grid; }
+  #grid img { width: 100%; background: #fff; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Optical transfer sender</h1>
+  <p>Pick a file or a folder. The server packs it into wire-v3 fountain frames and plays the QR carousel below — point a Decimen receiver at it.</p>
+</header>
+
+<main>
+  <section class="panel">
+    <div id="drop">
+      <div class="row" style="justify-content:center">
+        <button id="pickFile">Choose file…</button>
+        <button id="pickDir" class="ghost">Choose folder…</button>
+      </div>
+      <p class="hint">…or drop files here. Several files are bundled into one zip before transfer.</p>
+      <div id="files"></div>
+    </div>
+    <input id="fileInput" type="file" multiple hidden>
+    <input id="dirInput" type="file" webkitdirectory hidden>
+
+    <div class="row" style="margin-top:16px">
+      <label>Bytes per frame<select id="frameBytes"></select></label>
+      <label>Frames per second<select id="fps"></select></label>
+      <label>Carousel cycles<input id="cycles" type="number" min="1" max="20" value="2"></label>
+      <label>Render size (px)<input id="scale" type="number" min="128" max="2048" step="64" value="512"></label>
+      <button id="arm" disabled>Arm &amp; play</button>
+    </div>
+    <p class="hint">One cycle is a systematic sweep of all k blocks plus k repair frames — enough to decode at low loss. Extra cycles add repair diversity a looping player would otherwise replay verbatim.</p>
+    <p id="err"></p>
+  </section>
+
+  <section class="panel" id="stage">
+    <div id="canvasWrap"><canvas id="qr" width="512" height="512"></canvas></div>
+    <progress id="load" value="0" max="1"></progress>
+    <div class="row">
+      <button id="play">Pause</button>
+      <button id="toggleGrid" class="ghost">Show all frames</button>
+      <span id="pos" style="color:var(--dim)"></span>
+    </div>
+    <dl id="stats"></dl>
+    <div id="grid"></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let picked = [];
+let sess = null;
+let frames = [];      // Image objects, index = frame number
+let playing = false;
+let cur = 0, lastTick = 0;
+
+// ---- picking -----------------------------------------------------------
+function setPicked(list) {
+  picked = list;
+  const total = picked.reduce((n, f) => n + f.size, 0);
+  $("files").textContent = picked.length
+    ? `${picked.length} file(s), ${fmtBytes(total)}\n` +
+      picked.slice(0, 8).map((f) => "  " + (f.webkitRelativePath || f.name)).join("\n") +
+      (picked.length > 8 ? `\n  …and ${picked.length - 8} more` : "")
+    : "";
+  $("arm").disabled = picked.length === 0;
+}
+$("pickFile").onclick = () => $("fileInput").click();
+$("pickDir").onclick = () => $("dirInput").click();
+$("fileInput").onchange = (e) => setPicked([...e.target.files]);
+$("dirInput").onchange = (e) => setPicked([...e.target.files]);
+
+const drop = $("drop");
+drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => {
+  e.preventDefault(); drop.classList.remove("over");
+  setPicked([...e.dataTransfer.files]);
+});
+
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+// ---- options -----------------------------------------------------------
+(async () => {
+  const o = await (await fetch("/api/options")).json();
+  for (const v of o.frameBytesOptions) {
+    const el = new Option(`${v} bytes`, v, v === o.defaults.frameBytes, v === o.defaults.frameBytes);
+    $("frameBytes").add(el);
+  }
+  for (const v of o.fpsOptions) {
+    const el = new Option(`${v} fps`, v, v === o.defaults.fps, v === o.defaults.fps);
+    $("fps").add(el);
+  }
+})();
+
+// ---- arming ------------------------------------------------------------
+$("arm").onclick = async () => {
+  $("err").textContent = "";
+  $("arm").disabled = true;
+  const fd = new FormData();
+  // "paths" carries the folder tree the browser reports; the filename field
+  // alone loses it on the server side.
+  for (const f of picked) {
+    fd.append("files", f, f.name);
+    fd.append("paths", f.webkitRelativePath || f.name);
+  }
+  for (const k of ["frameBytes", "fps", "cycles", "scale"]) fd.append(k, $(k).value);
+  try {
+    const res = await fetch("/api/arm", { method: "POST", body: fd });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    start(body);
+  } catch (e) {
+    $("err").textContent = e.message;
+  } finally {
+    $("arm").disabled = picked.length === 0;
+  }
+};
+
+function start(s) {
+  sess = s;
+  $("stage").classList.add("on");
+  $("grid").classList.remove("on");
+  $("grid").innerHTML = "";
+  $("toggleGrid").textContent = "Show all frames";
+  renderStats(s);
+  frames = new Array(s.frameCount).fill(null);
+  cur = 0; lastTick = 0; playing = true;
+  $("play").textContent = "Pause";
+  loadFrames(s);
+  requestAnimationFrame(tick);
+}
+
+function renderStats(s) {
+  const rows = [
+    ["File", s.fileName],
+    ["Payload", `${fmtBytes(s.originalSize)} → ${fmtBytes(s.transmittedSize)} (${s.compression})`],
+    ["Source blocks (k)", s.k],
+    ["Block length", `${s.blockLen} B of ${s.frameBytes} B frame`],
+    ["Animation frames", `${s.frameCount} (${s.cycles} cycle(s))`],
+    ["Frame rate", `${s.fps} fps`],
+    ["QR version", `${s.qrVersion} · ECC L`],
+    ["Wire version", `v${s.wireVersion}`],
+  ];
+  if (s.bundled) rows.splice(1, 0, ["Bundle", `${s.fileCount} files zipped`]);
+  $("stats").innerHTML = rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+}
+
+// Fetch frames a few at a time, ahead of playback. A looping player asks for
+// every frame eventually, but waiting for all of them before the first one
+// appears would stall a large payload for seconds.
+async function loadFrames(s) {
+  const CONCURRENCY = 8;
+  let next = 0, done = 0;
+  const mine = s.id;
+  async function worker() {
+    while (next < s.frameCount && sess && sess.id === mine) {
+      const n = next++;
+      await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = img.onerror = () => {
+          frames[n] = img;
+          $("load").value = ++done / s.frameCount;
+          resolve();
+        };
+        img.src = `/api/sessions/${s.id}/frames/${n}`;
+      });
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+}
+
+// ---- playback ----------------------------------------------------------
+function tick(now) {
+  requestAnimationFrame(tick);
+  if (!sess || !playing) return;
+  const interval = 1000 / sess.fps;
+  if (now - lastTick < interval) return;
+  lastTick = now;
+  // Skip forward only over frames that have arrived; a not-yet-loaded frame
+  // holds the current one on screen rather than flashing white. The fountain
+  // absorbs a repeat, so holding is always safe.
+  for (let probe = 0; probe < sess.frameCount; probe++) {
+    const n = (cur + probe) % sess.frameCount;
+    if (frames[n]) { cur = n; break; }
+  }
+  draw(frames[cur]);
+  $("pos").textContent = `frame ${cur + 1} / ${sess.frameCount}`;
+  cur = (cur + 1) % sess.frameCount;
+}
+
+function draw(img) {
+  if (!img || !img.naturalWidth) return;
+  const c = $("qr");
+  if (c.width !== img.naturalWidth) { c.width = img.naturalWidth; c.height = img.naturalHeight; }
+  const ctx = c.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, 0, 0);
+}
+
+$("play").onclick = () => {
+  playing = !playing;
+  $("play").textContent = playing ? "Pause" : "Play";
+};
+
+$("toggleGrid").onclick = () => {
+  const g = $("grid");
+  g.classList.toggle("on");
+  const on = g.classList.contains("on");
+  $("toggleGrid").textContent = on ? "Hide all frames" : "Show all frames";
+  if (on && !g.innerHTML && sess) {
+    g.innerHTML = Array.from({ length: sess.frameCount }, (_, n) =>
+      `<img loading="lazy" alt="frame ${n}" src="/api/sessions/${sess.id}/frames/${n}">`).join("");
+  }
+};
+</script>
+</body>
+</html>
