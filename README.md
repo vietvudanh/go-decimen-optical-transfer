@@ -1,12 +1,12 @@
 # qr-server
 
+Golang port for server part from [bashalarmistalt/decimen-optical-transfer](https://github.com/bashalarmistalt/decimen-optical-transfer)
+
 ![Screenshot](docs/screenshot.jpg)
 
 A Go web app that turns a file or a folder into a QR code carousel a camera can
-read. It is the **sending** half of [Decimen optical
-transfer](https://github.com/decimen/decimen-optical-transfer), ported from that
-app's TypeScript `shared/` modules to Go and served over HTTP instead of run on
-the desktop.
+read. It is the **sending** half of [bashalarmistalt/decimen-optical-transfer](https://github.com/bashalarmistalt/decimen-optical-transfer),
+ported from that app's TypeScript `shared/` modules to Go and served over HTTP instead of run on the desktop.
 
 Frames are byte-identical to what the original sender emits (wire format v3), so
 a Decimen receiver — or any client holding to the same golden vectors — decodes
